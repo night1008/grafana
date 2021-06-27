@@ -8,6 +8,7 @@ import (
 	"github.com/grafana/grafana/pkg/bus"
 	"github.com/grafana/grafana/pkg/infra/metrics"
 	"github.com/grafana/grafana/pkg/models"
+	"github.com/grafana/grafana/pkg/services/sqlstore"
 	"github.com/grafana/grafana/pkg/setting"
 	"github.com/grafana/grafana/pkg/util"
 )
@@ -178,6 +179,33 @@ func SearchOrgs(c *models.ReqContext) response.Response {
 
 	if err := bus.Dispatch(&query); err != nil {
 		return response.Error(500, "Failed to search orgs", err)
+	}
+
+	return response.JSON(200, query.Result)
+}
+
+// GET /api/org/dashboards
+func GetOrgDashboards(c *models.ReqContext) response.Response {
+	limit := c.QueryInt64("limit")
+	page := c.QueryInt64("page")
+	teamId := c.QueryInt64("teamId")
+
+	if limit > 5000 {
+		return response.Error(422, "Limit is above maximum allowed (5000), use page parameter to access hits beyond limit", nil)
+	}
+	if limit == 0 {
+		limit = 5000
+	}
+
+	query := sqlstore.GetOrgDashboardsQuery{
+		SignedInUser: c.SignedInUser,
+		TeamId:       teamId,
+		Limit:        limit,
+		Page:         page,
+	}
+	err := bus.Dispatch(&query)
+	if err != nil {
+		return response.Error(500, "GetOrgDashboards failed", err)
 	}
 
 	return response.JSON(200, query.Result)

@@ -176,3 +176,14 @@ func (hs *HTTPServer) UpdateTeamPreferences(c *models.ReqContext, dtoCmd dtos.Up
 var createTeam = func(sqlStore *sqlstore.SQLStore, name, email string, orgID int64) (models.Team, error) {
 	return sqlStore.CreateTeam(name, email, orgID)
 }
+
+// PUT /api/teams/:teamId/dashboards
+func (hs *HTTPServer) UpdateTeamDashboards(c *models.ReqContext, cmd models.UpdateTeamDashboardsCommand) response.Response {
+	cmd.OrgId = c.OrgId
+	cmd.TeamId = c.ParamsInt64(":teamId")
+	if err := bus.Dispatch(&cmd); err != nil {
+		return response.Error(500, "Failed to update Team Dashboards", err)
+	}
+
+	return response.Success("Team Dashboard updated!")
+}

@@ -179,6 +179,7 @@ func (hs *HTTPServer) registerRoutes() {
 			teamsRoute.Delete("/:teamId/members/:userId", routing.Wrap(hs.RemoveTeamMember))
 			teamsRoute.Get("/:teamId/preferences", routing.Wrap(hs.GetTeamPreferences))
 			teamsRoute.Put("/:teamId/preferences", bind(dtos.UpdatePrefsCmd{}), routing.Wrap(hs.UpdateTeamPreferences))
+			teamsRoute.Put("/:teamId/dashboards", bind(models.UpdateTeamDashboardsCommand{}), routing.Wrap(hs.UpdateTeamDashboards))
 		}, reqCanAccessTeams)
 
 		// team without requirement of user to be org admin
@@ -212,6 +213,9 @@ func (hs *HTTPServer) registerRoutes() {
 			// prefs
 			orgRoute.Get("/preferences", reqOrgAdmin, routing.Wrap(GetOrgPreferences))
 			orgRoute.Put("/preferences", reqOrgAdmin, bind(dtos.UpdatePrefsCmd{}), routing.Wrap(UpdateOrgPreferences))
+
+			// dashboards
+			orgRoute.Get("/dashboards", routing.Wrap(GetOrgDashboards))
 		})
 
 		// current org without requirement of user to be org admin

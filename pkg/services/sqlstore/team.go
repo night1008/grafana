@@ -22,6 +22,8 @@ func init() {
 	bus.AddHandler("sql", RemoveTeamMember)
 	bus.AddHandler("sql", GetTeamMembers)
 	bus.AddHandler("sql", IsAdminOfTeams)
+	bus.AddHandler("sql", GetUserTeamDashboards)
+	bus.AddHandler("sql", UpdateTeamDashboards)
 }
 
 func getFilteredUsers(signedInUser *models.SignedInUser, hiddenUsers map[string]struct{}) []string {
@@ -136,6 +138,7 @@ func DeleteTeam(cmd *models.DeleteTeamCommand) error {
 			"DELETE FROM team_member WHERE org_id=? and team_id = ?",
 			"DELETE FROM team WHERE org_id=? and id = ?",
 			"DELETE FROM dashboard_acl WHERE org_id=? and team_id = ?",
+			"DELETE FROM team_dashboard WHERE org_id=? and team_id = ?",
 		}
 
 		for _, sql := range deletes {
@@ -457,4 +460,134 @@ func IsAdminOfTeams(query *models.IsAdminOfTeamsQuery) error {
 	query.Result = len(resp) > 0 && resp[0].Count > 0
 
 	return nil
+}
+
+func GetUserTeamDashboards(query *models.GetUserTeamDashboardsQuery) error {
+	sql := bytes.Buffer{}
+	params := make([]interface{}, 0)
+	sql.WriteString(
+		`SELECT id FROM dashboard
+			INNER JOIN (
+			SELECT dashboard_id FROM team_dashboard
+			 WHERE `)
+
+	if query.TeamId != 0 {
+		sql.WriteString("org_id=? AND team_id=?")
+		params = append(params, query.OrgId, query.TeamId)
+	} else {
+		sql.WriteString(
+			`team_id IN (
+				SELECT team_id FROM team_member WHERE org_id=? AND user_id=?
+			) OR org_id IN (
+				SELECT org_id FROM org_user WHERE org_id=? AND user_id=? AND role=?
+			)`)
+		params = append(params, query.OrgId, query.UserId, query.OrgId, query.UserId, models.PERMISSION_ADMIN.String())
+	}
+	sql.WriteString(
+		`) AS td
+		ON dashboard.id = td.dashboard_id
+		OR dashboard.folder_id = td.dashboard_id`)
+
+	var stars = make([]*models.Dashboard, 0)
+	if err := x.SQL(sql.String(), params...).Find(&stars); err != nil {
+		return err
+	}
+
+	query.Result = make(map[int64]bool)
+	for _, star := range stars {
+		query.Result[star.Id] = true
+	}
+
+	return nil
+}
+
+func UpdateTeamDashboards(query *models.UpdateTeamDashboardsCommand) error {
+	return inTransaction(func(sess *DBSession) error {
+		dashboards := make([]*models.Dashboard, 0)
+		if len(query.DashboardIds) > 0 {
+			params := make([]interface{}, 0)
+			params = append(params, query.OrgId)
+			for _, id := range query.DashboardIds {
+				params = append(params, id)
+			}
+			builder := &SQLBuilder{}
+			builder.Write("SELECT id, folder_id, is_folder FROM dashboard WHERE org_id=? AND id IN (? "+strings.Repeat(",?", len(query.DashboardIds)-1)+")", params...)
+			if err := x.SQL(builder.GetSQLString(), builder.params...).Find(&dashboards); err != nil {
+				return err
+			}
+		}
+
+		folderIds := make(map[int64]bool, 0)
+		addDashboardIds := make([]int64, 0)
+		for _, d := range dashboards {
+			if d.IsFolder {
+				folderIds[d.Id] = true
+				addDashboardIds = append(addDashboardIds, d.Id)
+			}
+		}
+		for _, d := range dashboards {
+			if d.IsFolder {
+				continue
+			}
+			if _, ok := folderIds[d.FolderId]; ok {
+				continue
+			}
+			addDashboardIds = append(addDashboardIds, d.Id)
+		}
+
+		existedDashboardIds := []*int64{}
+		teamDashboardSQL := "SELECT dashboard_id FROM team_dashboard WHERE org_id = ? AND team_id = ?"
+		if err := x.SQL(teamDashboardSQL, query.OrgId, query.TeamId).Find(&existedDashboardIds); err != nil {
+			return err
+		}
+
+		var deleteTeamDashboardIds []int64
+		var insertTeamDashboardIds []*models.TeamDashboard
+		for _, id1 := range existedDashboardIds {
+			exist := false
+			for _, id2 := range addDashboardIds {
+				if *id1 == id2 {
+					exist = true
+					break
+				}
+			}
+			if !exist {
+				deleteTeamDashboardIds = append(deleteTeamDashboardIds, *id1)
+			}
+		}
+		for _, id1 := range addDashboardIds {
+			exist := false
+			for _, id2 := range existedDashboardIds {
+				if id1 == *id2 {
+					exist = true
+					break
+				}
+			}
+			if !exist {
+				insertTeamDashboardIds = append(insertTeamDashboardIds, &models.TeamDashboard{
+					OrgId:       query.OrgId,
+					TeamId:      query.TeamId,
+					DashboardId: id1,
+				})
+			}
+		}
+
+		if len(deleteTeamDashboardIds) > 0 {
+			params := make([]interface{}, 0)
+			params = append(params, "DELETE FROM team_dashboard WHERE org_id=? AND team_id=? AND dashboard_id IN (? "+strings.Repeat(",?", len(deleteTeamDashboardIds)-1)+")", query.OrgId, query.TeamId)
+			for _, id := range deleteTeamDashboardIds {
+				params = append(params, id)
+			}
+			if _, err := sess.Exec(params...); err != nil {
+				return err
+			}
+		}
+
+		_, err := sess.InsertMulti(insertTeamDashboardIds)
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
 }

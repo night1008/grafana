@@ -3,11 +3,13 @@ package sqlstore
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/grafana/grafana/pkg/bus"
 	"github.com/grafana/grafana/pkg/events"
 	"github.com/grafana/grafana/pkg/models"
+	"github.com/grafana/grafana/pkg/services/search"
 	"github.com/grafana/grafana/pkg/setting"
 	"xorm.io/xorm"
 )
@@ -23,6 +25,7 @@ func init() {
 	bus.AddHandler("sql", GetOrgByName)
 	bus.AddHandler("sql", SearchOrgs)
 	bus.AddHandler("sql", DeleteOrg)
+	bus.AddHandler("sql", GetOrgDashboards)
 }
 
 func SearchOrgs(query *models.SearchOrgsQuery) error {
@@ -241,6 +244,7 @@ func DeleteOrg(cmd *models.DeleteOrgCommand) error {
 			"DELETE FROM org_user WHERE org_id = ?",
 			"DELETE FROM org WHERE id = ?",
 			"DELETE FROM temp_user WHERE org_id = ?",
+			"DELETE FROM team_dashboard WHERE org_id = ?",
 		}
 
 		for _, sql := range deletes {
@@ -356,4 +360,83 @@ func getOrCreateOrg(sess *DBSession, orgName string) (int64, error) {
 	})
 
 	return org.Id, nil
+}
+
+type GetOrgDashboardsQuery struct {
+	SignedInUser *models.SignedInUser
+	TeamId       int64
+	Limit        int64
+	Page         int64
+
+	Result search.HitList
+}
+
+func GetOrgDashboards(query *GetOrgDashboardsQuery) error {
+	dashboardQuery := search.FindPersistedDashboardsQuery{
+		SignedInUser: query.SignedInUser,
+		Limit:        query.Limit,
+		Page:         query.Page,
+	}
+
+	if err := bus.Dispatch(&dashboardQuery); err != nil {
+		return err
+	}
+
+	hits := dashboardQuery.Result
+	sortedHits := make(search.HitList, 0)
+	sortedHits = append(sortedHits, hits...)
+	sort.Sort(sortedHits)
+	for _, hit := range sortedHits {
+		sort.Strings(hit.Tags)
+	}
+
+	if err := setStarredDashboards(query.SignedInUser.UserId, hits); err != nil {
+		return err
+	}
+
+	if err := setTeamedDashboards(query.SignedInUser.OrgId, query.TeamId, query.SignedInUser.UserId, hits); err != nil {
+		return err
+	}
+
+	query.Result = hits
+
+	return nil
+}
+
+func setStarredDashboards(userID int64, hits []*search.Hit) error {
+	query := models.GetUserStarsQuery{
+		UserId: userID,
+	}
+
+	if err := bus.Dispatch(&query); err != nil {
+		return err
+	}
+
+	for _, dashboard := range hits {
+		if _, ok := query.Result[dashboard.ID]; ok {
+			dashboard.IsStarred = true
+		}
+	}
+
+	return nil
+}
+
+func setTeamedDashboards(orgId, teamId, userId int64, hits []*search.Hit) error {
+	query := models.GetUserTeamDashboardsQuery{
+		OrgId:  orgId,
+		TeamId: teamId,
+		UserId: userId,
+	}
+
+	if err := bus.Dispatch(&query); err != nil {
+		return err
+	}
+
+	for _, dashboard := range hits {
+		if _, ok := query.Result[dashboard.ID]; ok {
+			dashboard.IsTeamDashboard = true
+		}
+	}
+
+	return nil
 }
